@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.cuda import amp
 
 from dataset import DIV2K_Validation, fsr_edge, to_grayscale
-from train import build_loaders, save_preview, psnr
+from train import build_loaders, save_preview, psnr, preprocess_edge
 from model import EdgeGuidedCNN, apply_rcas
 
 
@@ -15,18 +15,29 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 	preview_dir = Path(save_dir) / "preview"
 	preview_dir.mkdir(parents=True, exist_ok=True)
 
-	_, valid_loader = build_loaders(scale, batch_size, num_workers, lr_mode, val_batch_size=batch_size)
+	# Validation loader must use batch_size=1 because validation images have different sizes
+	_, valid_loader = build_loaders(scale, 1, num_workers, lr_mode, val_batch_size=1)
 
 	# Lightweight model structure matching train.py
 	model = EdgeGuidedCNN(input_channels=4, num_features=64, head_features=48, scale=scale, num_blocks=16).to(device)
 	checkpoint_data = torch.load(checkpoint, map_location=device)
-	model.load_state_dict(checkpoint_data.get("model", checkpoint_data))
+	
+	try:
+		model.load_state_dict(checkpoint_data.get("model", checkpoint_data))
+	except RuntimeError as e:
+		print(f"\n[Error] Checkpoint loading failed: {e}")
+		print("[Info] The model architecture has changed (new gradients inputs, gate mechanisms).")
+		print("[Info] Please retrain the model using 'python main.py' to generate a compatible checkpoint.")
+		return
+
 	model.eval()
 
 	criterion = torch.nn.MSELoss()
 	total_loss = 0.0
 	total_psnr = 0.0
 	total_lr_psnr = 0.0  # Baseline: bicubic LR upsampled PSNR
+	
+	psnr_list = []
 	saved = 0
 
 	with torch.no_grad():
@@ -35,6 +46,9 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 			edge_lr = edge_lr.to(device)
 			hr = hr.to(device)
 			edge_hr = edge_hr.to(device)
+
+			# Preprocess edge map (consistent with training)
+			edge_lr = preprocess_edge(edge_lr)
 
 			with amp.autocast(enabled=device.type == "cuda"):
 				sr = model(lr, edge_lr)
@@ -52,7 +66,11 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 				lr_upsampled_psnr = F.interpolate(lr, size=hr.shape[-2:], mode='bicubic', align_corners=False).clamp(0, 1)
 
 			total_loss += loss.item()
-			total_psnr += psnr(sr.clamp(0, 1), hr).item()
+			
+			current_psnr = psnr(sr.clamp(0, 1), hr).item()
+			total_psnr += current_psnr
+			psnr_list.append(current_psnr)
+			
 			total_lr_psnr += psnr(lr_upsampled_psnr, hr).item()
 
 			# Sharpen image AFTER loss calculation for preview
@@ -69,7 +87,15 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 	avg_loss = total_loss / n
 	avg_psnr = total_psnr / n
 	avg_lr_psnr = total_lr_psnr / n
-	print(f"Validation | loss: {avg_loss:.4f} | model_psnr: {avg_psnr:.2f} | lr_psnr: {avg_lr_psnr:.2f}")
+
+	print(f"\n=== Validation Results ===")
+	print(f"Loss: {avg_loss:.4f}")
+	print(f"Average PSNR: {avg_psnr:.2f}")
+	print(f"Bicubic PSNR: {avg_lr_psnr:.2f}")
+	if psnr_list:
+		print(f"Min PSNR: {min(psnr_list):.2f}")
+		print(f"Max PSNR: {max(psnr_list):.2f}")
+	print(f"Previews saved to: {preview_dir}")
 
 
 def main():

@@ -104,10 +104,12 @@ def main():
     parser = argparse.ArgumentParser(description="FSR Benchmark on DIV2K")
     parser.add_argument("--scale", type=int, default=4)
     parser.add_argument("--val_hr", type=str, default="./DIV2K/DIV2K_valid_HR")
-    parser.add_argument("--val_lr", type=str, default="./DIV2K/DIV2K_valid_LR_bicubic/X4")
+    parser.add_argument("--val_lr", type=str, default="./DIV2K/DIV2K_valid_LR_bicubic/")
     parser.add_argument("--save_dir", type=str, default="FSR_output")
     parser.add_argument("--preview_count", type=int, default=3)
     args = parser.parse_args()
+    
+    args.val_lr = os.path.join(args.val_lr, f"x{args.scale}")
     
     evaluate_fsr(
         scale=args.scale,
