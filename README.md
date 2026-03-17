@@ -42,7 +42,7 @@ The model takes two inputs: the Low-Resolution (LR) RGB image and its correspond
 *   **Loss:** $L_{total} = MSE(SR, HR) + \lambda \cdot MSE(Edge(SR), Edge(HR))$
 *   **Lambda ($\lambda$):** 0.015
 *   **Optimizer:** Adam (`lr=2e-4`).
-*   **Scheduler:** ReduceLROnPlateau.
+*   **Scheduler:** CosineAnnealingLR (with 5-epoch Linear Warmup).
 
 ## Project Structure
 

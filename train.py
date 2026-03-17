@@ -282,7 +282,27 @@ def main():
 	# Lightweight model structure for weak devices (approx FSR complexity)
 	model = EdgeGuidedCNN(input_channels=4, num_features=64, head_features=48, scale=args.scale, num_blocks=16, use_edge_branch=bool(args.use_edge_branch)).to(device)
 	optimizer = optim.Adam(model.parameters(), lr=args.lr)
-	scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2, verbose=True)
+	# scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2, verbose=True)
+	
+	# Cosine Annealing with Warmup
+	warmup_epochs = 5
+	eta_min = 1e-6
+	
+	# Attempt to use SequentialLR (PyTorch 1.10+)
+	try:
+		from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+		# Linear warmup from 10% of lr to full lr
+		warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
+		
+		# Cosine annealing for the rest
+		# T_max is remaining epochs
+		main_scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs - warmup_epochs, eta_min=eta_min)
+		
+		scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
+	except ImportError:
+		print("SequentialLR/LinearLR not found (PyTorch < 1.10). Using standard CosineAnnealingLR.")
+		scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=eta_min)
+
 	scaler = amp.GradScaler(enabled=device.type == "cuda")
 
 	start_epoch = 0
@@ -300,7 +320,7 @@ def main():
 		train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, args.lambda_edge, bool(args.use_rcas), args.rcas_strength)
 		val_loss, val_psnr, lr_psnr = validate(model, valid_loader, device, args.lambda_edge, args.scale, preview_dir, args.preview_count, epoch, bool(args.use_rcas), args.rcas_strength)
 
-		scheduler.step(val_psnr)
+		scheduler.step()
 
 		state = {
 			"epoch": epoch + 1,
