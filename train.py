@@ -23,16 +23,21 @@ def preprocess_edge(edge: torch.Tensor) -> torch.Tensor:
 	Preprocess edge map to reduce noise:
 	1. Thresholding: set weak edges to 0
 	2. Conditional Gaussian Blur: if edge map is too noisy (high mean intensity)
+	Since edge is now (B, 2, H, W) [Gx, Gy], we use magnitude for logical checks.
 	"""
+	# Check magnitude for thresholding decisions
+	mag = torch.norm(edge, dim=1, keepdim=True) # [B, 1, H, W]
+
 	# 1. Thresholding
 	threshold = 0.1
-	edge = torch.where(edge < threshold, torch.tensor(0.0, device=edge.device), edge)
+	mask = (mag >= threshold).float()
+	edge = edge * mask
 
 	# 2. Conditional Gaussian Blur
-	# "If it's too noisy" -> Check mean intensity
-	if edge.mean() > 0.15:
+	# Checks mean of magnitude
+	if mag.mean() > 0.15:
 		# Use Gaussian Blur to smooth out high frequency noise
-		# kernel_size must be odd
+		# Apply independently to Gx and Gy
 		edge = T.GaussianBlur(kernel_size=3, sigma=0.5)(edge)
 
 	return edge
@@ -242,6 +247,7 @@ def save_checkpoint(state: dict, is_best: bool, save_dir: Path):
 	if is_best:
 		best_path = save_dir / "best.pth"
 		torch.save(state, best_path)
+		print(f"Saved new best checkpoint with PSNR: {state.get('best_psnr', 0):.4f}")
 
 
 def main():

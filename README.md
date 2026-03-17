@@ -7,34 +7,34 @@ This project implements a Single Image Super-Resolution (SISR) model that combin
 *   **Modified SRCNN Backbone:** Replaces typical heavy Residual Blocks with the classic 3-layer SRCNN structure (9-5-5 kernels), adapted for feature extraction. This significantly reduces model complexity.
 *   **SiLU Activation:** Uses **SiLU (Swish)** instead of ReLU for smoother gradient flow and better performance in deep networks.
 *   **Edge Attention Mechanism:** Instead of simple concatenation, the model uses an explicit attention gate (`RGB_Feat * Sigmoid(Edge_Feat)`) to boost features in high-frequency regions.
-*   **FSR-Style Edge Detection:** Implements an edge detection algorithm based on AMD FSR's EASU (Edge Adaptive Spatial Upsampling). It calculates edge strength using luminance difference analysis on a cross-pattern grid, normalized to [0, 1].
-*   **Edge Preprocessing Pipeline:** Features a robust preprocessing step for edge maps:
-    *   **Thresholding:** Removes weak noise (values < 0.1).
-    *   **Conditional Gaussian Blur:** Automatically applies smoothing if the edge map is detected as too noisy (mean intensity > 0.15).
+*   **Deep Edge Injection:** Concatenates directional edge gradients into *every* layer of the SRCNN backbone, ensuring the network can guide its feature extraction with explicit edge information at all depths.
+*   **Directional Edge Detection:** Uses Sobel gradients ($G_x, G_y$) instead of simple intensity differences, providing the network with directional context for edge reconstruction.
+    *   **Preprocessing:** Applies thresholding and conditional blur based on gradient magnitude.
 *   **Edge-Aware Loss:** Training is guided by a composite loss function that minimizes pixel-wise error (MSE) while enforcing edge consistency (Edge Loss) with a weight of `0.015`.
 *   **Global Residual Learning:** The model learns the *residual* difference between the target HR image and the bicubic-upsampled LR image, ensuring detailed texture recovery.
 
 ## Algorithm Description
 
-### 1. Edge Extraction (FSR-EASU)
-Instead of standard Sobel filters, we use an approximation of the "len" (length/strength) parameter from FSR 1.0. 
-For a center pixel $f$ and its neighbors $b, h, e, g$ (top, bottom, left, right):
-$$ Edge = |b - f| + |h - f| + |e - f| + |g - f| $$
-This map is then clamped to the range $[0, 1]$.
+### 1. Edge Extraction (Directional)
+We use Sobel filters to compute gradients in X and Y directions, capturing directional edge information.
+$$ Edge = [\tanh(G_x), \tanh(G_y)] $$
+The output is a 2-channel tensor with values approximately in $(-1, 1)$.
 
 ### 2. Network Architecture
-The model takes two inputs: the Low-Resolution (LR) RGB image and its corresponding Edge Map.
+The model takes two inputs: the Low-Resolution (LR) RGB image and its corresponding 2-channel Edge Map.
 
 1.  **Dual Heads:**
     *   `RGB Head`: 3 -> 96 channels (9x9 Conv) + **SiLU**.
-    *   `Edge Head`: 1 -> 96 channels (9x9 Conv) + **SiLU**.
+    *   `Edge Head`: 2 -> 32 channels (9x9 Conv) + **SiLU**.
 2.  **Edge Attention:**
-    *   `Feat = RGB_Head(LR) * Sigmoid(Edge_Head(Edge))`
-    *   This acts as a spatial gate, amplifying features where edge probability is high.
-3.  **Backbone (SRCNN):**
-    *   Layer 1: Conv 9x9 (64 filters) + **SiLU**.
-    *   Layer 2: Conv 5x5 (32 filters) + **SiLU**.
-    *   Layer 3: Conv 5x5 (64 filters).
+    *   `Feat = RGB_Head(LR)`
+    *   `Edge_Weights = Sigmoid(Edge_Head(Edge))`
+    *   `Weighted_Feat = Feat * Edge_Weights`
+3.  **Backbone (Edge-Injected SRCNN):**
+    Each convolutional layer in the SRCNN backbone receives the encoded edge features via concatenation.
+    *   `Input`: Concat(Weighted_Feat, Edge_Enc) -> Conv 9x9 (64 filters) + **SiLU**.
+    *   `Hidden`: Concat(Feat, Edge_Enc) -> Conv 5x5 (32 filters) + **SiLU**.
+    *   `Output`: Concat(Feat, Edge_Enc) -> Conv 5x5 (64 filters).
 4.  **Upsampling:** Sub-pixel convolution (PixelShuffle) to reach target resolution.
 5.  **Global Residual:** Final output = `Model(LR) + Bicubic(LR)`.
 

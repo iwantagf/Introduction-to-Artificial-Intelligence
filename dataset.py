@@ -16,8 +16,8 @@ def to_grayscale(rgb: torch.Tensor) -> torch.Tensor:
 
 def fsr_edge(x):
     """
-    Compute edge map using FSR-style luminance difference analysis.
-    Ideally approximates the 'len' (edge strength) parameter in FSR 1.0 EASU.
+    Compute edge map using Sobel gradients to capture directionality.
+    Returns 2-channel edge map (Gx, Gy) normalized vaguely to [-1, 1].
     """
     if x.shape[1] == 3:
         # RGB to Luma (Rec.709 approximate as used in FSR often)
@@ -25,34 +25,14 @@ def fsr_edge(x):
     else:
         luma = x
 
-    # Pad for 3x3 window
-    padded = F.pad(luma, (1, 1, 1, 1), mode='replicate')
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], device=x.device).view(1, 1, 3, 3).float()
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], device=x.device).view(1, 1, 3, 3).float()
     
-    # Extract neighbors
-    # b c d
-    # e f g
-    # h i j
-    # where f is the center pixel (luma)
+    gx = F.conv2d(luma, sobel_x, padding=1)
+    gy = F.conv2d(luma, sobel_y, padding=1)
     
-    # Top row
-    b = padded[:, :, 0:-2, 1:-1]
-    
-    # Middle row
-    f = padded[:, :, 1:-1, 1:-1] # center
-    e = padded[:, :, 1:-1, 0:-2] # left
-    g = padded[:, :, 1:-1, 2:]   # right
-    
-    # Bottom row
-    h = padded[:, :, 2:, 1:-1]
-
-    # FSR EASU generic edge check (simplified) determines edge presence by checking difference
-    # between center and neighbors in a + shape (b, h, e, g)
-    # Strength = |b-f| + |h-f| + |e-f| + |g-f|
-    
-    edge = torch.abs(b - f) + torch.abs(h - f) + torch.abs(e - f) + torch.abs(g - f)
-    
-    # Normalize edge map to (0, 1) by clamping
-    return edge.clamp(0.0, 1.0)
+    # We use tanh to normalize to (-1, 1) approximately to handle varying intensities
+    return torch.cat([torch.tanh(gx), torch.tanh(gy)], dim=1)
 
 class DIV2K_Dataset(Dataset):
     def __init__(self, hr_dir: str, lr_dir: str, scale: int = 4, patch_size: int = 96, augment: bool = True):

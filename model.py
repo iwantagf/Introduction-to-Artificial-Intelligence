@@ -25,20 +25,33 @@ def apply_rcas(img: torch.Tensor, strength: float = 0.5) -> torch.Tensor:
 
 
 class SRCNNBackbone(nn.Module):
-    def __init__(self, input_channels, internal_channels=64):
+    def __init__(self, input_channels, edge_channels, internal_channels=64):
         super().__init__()
-        # SRCNN-inspired backbone: 9-5-5 structure
-        # Adapted to preserve spatial dimensions (padding) and input/output channel count
-        self.net = nn.Sequential(
-            nn.Conv2d(input_channels, 64, kernel_size=9, padding=4),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, 32, kernel_size=5, padding=2), # Original SRCNN used 1x1 or 5x5 here
-            nn.SiLU(inplace=True),
-            nn.Conv2d(32, input_channels, kernel_size=5, padding=2)
-        )
+        # SRCNN-inspired backbone with Edge Injection at every layer
+        # Layer 1
+        self.conv1 = nn.Conv2d(input_channels, 64, kernel_size=9, padding=4)
+        self.act1 = nn.SiLU(inplace=True)
+        
+        # Layer 2: Injection. Input = 64 (from L1) + edge_channels
+        self.conv2 = nn.Conv2d(64 + edge_channels, 32, kernel_size=5, padding=2)
+        self.act2 = nn.SiLU(inplace=True)
+        
+        # Layer 3: Injection. Input = 32 (from L2) + edge_channels
+        self.conv3 = nn.Conv2d(32 + edge_channels, input_channels, kernel_size=5, padding=2)
 
-    def forward(self, x):
-        return self.net(x)
+    def forward(self, x, edge_feat):
+        # Layer 1
+        x = self.act1(self.conv1(x))
+        
+        # Injection 1: Concatenate edge features
+        x = torch.cat([x, edge_feat], dim=1)
+        x = self.act2(self.conv2(x))
+        
+        # Injection 2: Concatenate edge features
+        x = torch.cat([x, edge_feat], dim=1)
+        x = self.conv3(x)
+        
+        return x
 
 class EdgeGuidedCNN(nn.Module):
     def __init__(self, input_channels: int = 4, num_features: int = 64, head_features: int = 96, scale: int = 2, num_blocks: int = 8, use_edge_branch: bool = True):
@@ -52,27 +65,33 @@ class EdgeGuidedCNN(nn.Module):
                 nn.Conv2d(3, head_features, kernel_size=9, padding=4),
                 nn.SiLU(inplace=True),
             )
-            # Edge head must match rgb_head channels for element-wise attention
+            # Edge head taking 2 channels (Gx, Gy)
+            # We want this to produce a feature map useful for injection.
+            # Let's say we project it to 'head_features' size initially for fusion,
+            # but also keep a version for injection (or reuse the same).
+            # To keep dims consistent for SRCNN backbone injection, we'll define dim.
+            self.edge_feat_dim = 32
             self.edge_head = nn.Sequential(
-                nn.Conv2d(1, head_features, kernel_size=9, padding=4),
+                nn.Conv2d(2, self.edge_feat_dim, kernel_size=9, padding=4),
                 nn.SiLU(inplace=True),
             )
-            # Fusion: No concatenation anymore, just projection after attention
-            # Input dim is head_features due to element-wise multiplication
+            
+            # Fusion: RGB (head_features) + Edge (edge_feat_dim) -> fused -> num_features
             self.fusion = nn.Sequential(
-                nn.Conv2d(head_features, num_features, kernel_size=3, padding=1),
+                nn.Conv2d(head_features + self.edge_feat_dim, num_features, kernel_size=3, padding=1),
                 nn.SiLU(inplace=True),
             )
         else:
-            # Original unified head
             self.head = nn.Sequential(
                 nn.Conv2d(input_channels, head_features, kernel_size=9, padding=4),
                 nn.SiLU(inplace=True),
             )
             self.fusion = nn.Conv2d(head_features, num_features, kernel_size=3, padding=1)
 
-        # Replaced ResBlock backbone with SRCNN structure
-        self.body = SRCNNBackbone(num_features)
+        # SRCNN Backbone now takes Edge Injection
+        # We pass 'edge_feat_dim' as the size of extra channels
+        edge_ch = self.edge_feat_dim if use_edge_branch else 0
+        self.body = SRCNNBackbone(num_features, edge_channels=edge_ch)
 
         self.upsampler = nn.Sequential(
             nn.Conv2d(num_features, num_features * (scale ** 2), kernel_size=3, padding=1),
@@ -87,18 +106,20 @@ class EdgeGuidedCNN(nn.Module):
     def forward(self, lr: torch.Tensor, edge: torch.Tensor) -> torch.Tensor:
         if self.use_edge_branch:
             rgb_feat = self.rgb_head(lr)
-            edge_feat = self.edge_head(edge)
+            # edge input is [B, 2, H, W]
+            edge_feat = self.edge_head(edge) # -> [B, 32, H, W]
             
-            # Edge Attention: Modulate RGB features with edge probability
-            # "Boost high-frequency" logic implies we want to emphasize features where edges are present
-            x = rgb_feat * torch.sigmoid(edge_feat)
-            
+            # Fusion at input
+            x = torch.cat([rgb_feat, edge_feat], dim=1)
             x = self.fusion(x)
+            
+            # Pass edge features to backbone for deep injection
+            x = self.body(x, edge_feat)
         else:
             x = self.head(lr)
             x = self.fusion(x)
+            x = self.body(x, None)
         
-        x = self.body(x)
         x = self.upsampler(x)
         sr = self.tail(x)
         return sr
