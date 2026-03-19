@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.cuda import amp
 
 from dataset import DIV2K_Validation, fsr_edge, to_grayscale
-from train import build_loaders, save_preview, psnr, preprocess_edge
+from train import benchmark_psnr, build_loaders, save_preview, psnr, preprocess_edge
 from model import EdgeGuidedCNN, apply_rcas
 
 
@@ -35,9 +35,12 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 	criterion = torch.nn.MSELoss()
 	total_loss = 0.0
 	total_psnr = 0.0
+	total_benchmark_psnr = 0.0
 	total_lr_psnr = 0.0  # Baseline: bicubic LR upsampled PSNR
+	total_lr_benchmark_psnr = 0.0
 	
 	psnr_list = []
+	benchmark_psnr_list = []
 	saved = 0
 
 	with torch.no_grad():
@@ -48,7 +51,7 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 			edge_hr = edge_hr.to(device)
 
 			# Preprocess edge map (consistent with training)
-			edge_lr = preprocess_edge(edge_lr)
+			edge_lr = preprocess_edge(edge_lr, scale)
 
 			with amp.autocast(enabled=device.type == "cuda"):
 				sr = model(lr, edge_lr)
@@ -68,10 +71,14 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 			total_loss += loss.item()
 			
 			current_psnr = psnr(sr.clamp(0, 1), hr).item()
+			current_benchmark_psnr = benchmark_psnr(sr, hr, shave=scale, y_channel=True).item()
 			total_psnr += current_psnr
+			total_benchmark_psnr += current_benchmark_psnr
 			psnr_list.append(current_psnr)
+			benchmark_psnr_list.append(current_benchmark_psnr)
 			
 			total_lr_psnr += psnr(lr_upsampled_psnr, hr).item()
+			total_lr_benchmark_psnr += benchmark_psnr(lr_upsampled_psnr, hr, shave=scale, y_channel=True).item()
 
 			# Sharpen image AFTER loss calculation for preview
 			if use_rcas:
@@ -86,15 +93,22 @@ def run_validation(checkpoint: str, scale: int, batch_size: int, num_workers: in
 	n = max(1, len(valid_loader))
 	avg_loss = total_loss / n
 	avg_psnr = total_psnr / n
+	avg_benchmark_psnr = total_benchmark_psnr / n
 	avg_lr_psnr = total_lr_psnr / n
+	avg_lr_benchmark_psnr = total_lr_benchmark_psnr / n
 
 	print(f"\n=== Validation Results ===")
 	print(f"Loss: {avg_loss:.4f}")
-	print(f"Average PSNR: {avg_psnr:.2f}")
-	print(f"Bicubic PSNR: {avg_lr_psnr:.2f}")
+	print(f"Average PSNR (RGB): {avg_psnr:.2f}")
+	print(f"Average PSNR (Y, shave={scale}): {avg_benchmark_psnr:.2f}")
+	print(f"Bicubic PSNR (RGB): {avg_lr_psnr:.2f}")
+	print(f"Bicubic PSNR (Y, shave={scale}): {avg_lr_benchmark_psnr:.2f}")
 	if psnr_list:
-		print(f"Min PSNR: {min(psnr_list):.2f}")
-		print(f"Max PSNR: {max(psnr_list):.2f}")
+		print(f"Min PSNR (RGB): {min(psnr_list):.2f}")
+		print(f"Max PSNR (RGB): {max(psnr_list):.2f}")
+	if benchmark_psnr_list:
+		print(f"Min PSNR (Y, shave={scale}): {min(benchmark_psnr_list):.2f}")
+		print(f"Max PSNR (Y, shave={scale}): {max(benchmark_psnr_list):.2f}")
 	print(f"Previews saved to: {preview_dir}")
 
 

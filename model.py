@@ -24,33 +24,51 @@ def apply_rcas(img: torch.Tensor, strength: float = 0.5) -> torch.Tensor:
     return sharpened.clamp(0, 1)
 
 
+class EdgeGate(nn.Module):
+    def __init__(self, in_channels, edge_channels):
+        super().__init__()
+        self.gate_conv = nn.Conv2d(edge_channels, in_channels, kernel_size=3, padding=1)
+
+    def forward(self, x, edge):
+        gate = torch.sigmoid(self.gate_conv(edge))
+        return x * gate + x
+
+
+class ResidualEdgeBlock(nn.Module):
+    def __init__(self, channels, edge_channels, kernel_size1=5, kernel_size2=5, residual_scale=0.1):
+        super().__init__()
+        self.residual_scale = residual_scale
+        self.gate1 = EdgeGate(channels, edge_channels)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=kernel_size1, padding=kernel_size1 // 2)
+        self.act1 = nn.SiLU(inplace=True)
+        self.gate2 = EdgeGate(channels, edge_channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=kernel_size2, padding=kernel_size2 // 2)
+
+    def forward(self, x, edge_feat):
+        residual = x
+
+        if edge_feat is not None:
+            x = self.gate1(x, edge_feat)
+        x = self.act1(self.conv1(x))
+
+        if edge_feat is not None:
+            x = self.gate2(x, edge_feat)
+        x = self.conv2(x)
+
+        return residual + self.residual_scale * x
+
+
 class SRCNNBackbone(nn.Module):
     def __init__(self, input_channels, edge_channels, internal_channels=64):
         super().__init__()
-        # SRCNN-inspired backbone with Edge Injection at every layer
-        # Layer 1
-        self.conv1 = nn.Conv2d(input_channels, 64, kernel_size=9, padding=4)
-        self.act1 = nn.SiLU(inplace=True)
-        
-        # Layer 2: Injection. Input = 64 (from L1) + edge_channels
-        self.conv2 = nn.Conv2d(64 + edge_channels, 32, kernel_size=5, padding=2)
-        self.act2 = nn.SiLU(inplace=True)
-        
-        # Layer 3: Injection. Input = 32 (from L2) + edge_channels
-        self.conv3 = nn.Conv2d(32 + edge_channels, input_channels, kernel_size=5, padding=2)
+        self.block1 = ResidualEdgeBlock(input_channels, edge_channels, kernel_size1=9, kernel_size2=5, residual_scale=0.3)
+        self.block2 = ResidualEdgeBlock(input_channels, edge_channels, kernel_size1=5, kernel_size2=5, residual_scale=0.3)
+        self.block3 = ResidualEdgeBlock(input_channels, edge_channels, kernel_size1=5, kernel_size2=5, residual_scale=0.3)
 
     def forward(self, x, edge_feat):
-        # Layer 1
-        x = self.act1(self.conv1(x))
-        
-        # Injection 1: Concatenate edge features
-        x = torch.cat([x, edge_feat], dim=1)
-        x = self.act2(self.conv2(x))
-        
-        # Injection 2: Concatenate edge features
-        x = torch.cat([x, edge_feat], dim=1)
-        x = self.conv3(x)
-        
+        x = self.block1(x, edge_feat)
+        x = self.block2(x, edge_feat)
+        x = self.block3(x, edge_feat)
         return x
 
 class EdgeGuidedCNN(nn.Module):
@@ -93,11 +111,22 @@ class EdgeGuidedCNN(nn.Module):
         edge_ch = self.edge_feat_dim if use_edge_branch else 0
         self.body = SRCNNBackbone(num_features, edge_channels=edge_ch)
 
-        self.upsampler = nn.Sequential(
-            nn.Conv2d(num_features, num_features * (scale ** 2), kernel_size=3, padding=1),
-            nn.PixelShuffle(scale), # Upscale
-            nn.SiLU(inplace=True),
-        )
+        if scale == 4:
+            # Multi-stage upsampling: x2 -> x2
+            self.upsampler = nn.Sequential(
+                nn.Conv2d(num_features, num_features * 4, kernel_size=3, padding=1),
+                nn.PixelShuffle(2),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(num_features, num_features * 4, kernel_size=3, padding=1),
+                nn.PixelShuffle(2),
+                nn.SiLU(inplace=True),
+            )
+        else:
+            self.upsampler = nn.Sequential(
+                nn.Conv2d(num_features, num_features * (scale ** 2), kernel_size=3, padding=1),
+                nn.PixelShuffle(scale), # Upscale
+                nn.SiLU(inplace=True),
+            )
 
         self.tail = nn.Conv2d(num_features, 3, kernel_size=3, padding=1)
 
@@ -113,7 +142,6 @@ class EdgeGuidedCNN(nn.Module):
             x = torch.cat([rgb_feat, edge_feat], dim=1)
             x = self.fusion(x)
             
-            # Pass edge features to backbone for deep injection
             x = self.body(x, edge_feat)
         else:
             x = self.head(lr)

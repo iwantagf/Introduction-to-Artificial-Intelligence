@@ -14,7 +14,7 @@ from tqdm import tqdm
 import numpy as np
 
 from dataset import DIV2K_Validation, fsr_edge
-from train import psnr
+from train import benchmark_psnr, psnr
 
 
 def fsr_edge_guided_upscale(lr, scale: int):
@@ -51,10 +51,12 @@ def evaluate_fsr(scale: int, val_dir_hr: str, val_dir_lr: str, save_dir: str, pr
     val_dataset = DIV2K_Validation(hr_dir=val_dir_hr, lr_dir=val_dir_lr, scale=scale)
     
     total_psnr = 0.0
+    total_benchmark_psnr = 0.0
     saved = 0
     to_pil = T.ToPILImage()
     
     psnr_list = []
+    benchmark_psnr_list = []
     
     for idx in tqdm(range(len(val_dataset)), desc="FSR Benchmark"):
         lr, _, hr, _ = val_dataset[idx]
@@ -71,8 +73,11 @@ def evaluate_fsr(scale: int, val_dir_hr: str, val_dir_lr: str, save_dir: str, pr
         
         # Compute PSNR
         psnr_val = psnr(sr_fsr.clamp(0, 1), hr).item()
+        benchmark_psnr_val = benchmark_psnr(sr_fsr, hr, shave=scale, y_channel=True).item()
         total_psnr += psnr_val
+        total_benchmark_psnr += benchmark_psnr_val
         psnr_list.append(psnr_val)
+        benchmark_psnr_list.append(benchmark_psnr_val)
         
         # Save previews (first few samples)
         if saved < preview_count:
@@ -90,14 +95,18 @@ def evaluate_fsr(scale: int, val_dir_hr: str, val_dir_lr: str, save_dir: str, pr
             saved += 1
     
     avg_psnr = total_psnr / max(1, len(val_dataset))
+    avg_benchmark_psnr = total_benchmark_psnr / max(1, len(val_dataset))
     
     print(f"\n=== FSR Benchmark Results ===")
-    print(f"Average PSNR: {avg_psnr:.2f}")
-    print(f"Min PSNR: {min(psnr_list):.2f}")
-    print(f"Max PSNR: {max(psnr_list):.2f}")
+    print(f"Average PSNR (RGB): {avg_psnr:.2f}")
+    print(f"Average PSNR (Y, shave={scale}): {avg_benchmark_psnr:.2f}")
+    print(f"Min PSNR (RGB): {min(psnr_list):.2f}")
+    print(f"Max PSNR (RGB): {max(psnr_list):.2f}")
+    print(f"Min PSNR (Y, shave={scale}): {min(benchmark_psnr_list):.2f}")
+    print(f"Max PSNR (Y, shave={scale}): {max(benchmark_psnr_list):.2f}")
     print(f"Previews saved to: {preview_dir}")
     
-    return avg_psnr
+    return avg_benchmark_psnr
 
 
 def main():
