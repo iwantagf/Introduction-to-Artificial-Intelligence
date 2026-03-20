@@ -7,6 +7,48 @@ import os
 import random
 
 
+def _list_image_files(image_dir: str):
+    valid_exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+    return sorted(
+        file_name
+        for file_name in os.listdir(image_dir)
+        if os.path.splitext(file_name)[1].lower() in valid_exts
+    )
+
+
+def _resolve_lr_filename(hr_name: str, lr_dir: str, scale: int) -> str:
+    stem, ext = os.path.splitext(hr_name)
+    candidates = [
+        hr_name,
+        f"{stem}x{scale}{ext}",
+        f"{stem}_x{scale}{ext}",
+        f"{stem}X{scale}{ext}",
+        f"{stem}_LRBI_x{scale}{ext}",
+        f"{stem}_LRB_x{scale}{ext}",
+        f"{stem}_LR_x{scale}{ext}",
+    ]
+
+    for candidate in candidates:
+        if os.path.exists(os.path.join(lr_dir, candidate)):
+            return candidate
+
+    raise FileNotFoundError(
+        f"Could not find LR pair for '{hr_name}' in '{lr_dir}' with scale x{scale}."
+    )
+
+
+def _modcrop_hr_to_match_lr(hr: Image.Image, lr: Image.Image, scale: int) -> Image.Image:
+    expected_width = lr.width * scale
+    expected_height = lr.height * scale
+
+    if hr.width == expected_width and hr.height == expected_height:
+        return hr
+
+    crop_width = min(hr.width, expected_width)
+    crop_height = min(hr.height, expected_height)
+    return hr.crop((0, 0, crop_width, crop_height))
+
+
 # Edge Extraction RCAS
 def to_grayscale(rgb: torch.Tensor) -> torch.Tensor:
     """Convert RGB to grayscale using standard luminance formula: 0.299R + 0.587G + 0.114B."""
@@ -42,7 +84,7 @@ class DIV2K_Dataset(Dataset):
         self.patch_size = patch_size
         self.augment = augment
 
-        self.hr_images = sorted(os.listdir(hr_dir))
+        self.hr_images = _list_image_files(hr_dir)
 
         self.to_tensor = T.ToTensor()
 
@@ -115,7 +157,7 @@ class DIV2K_Validation(Dataset):
         self.lr_dir = lr_dir
         self.scale = scale
         self.to_tensor = T.ToTensor()
-        self.hr_images = sorted(os.listdir(hr_dir))
+        self.hr_images = _list_image_files(hr_dir)
 
     def __len__(self):
         return len(self.hr_images)
@@ -136,6 +178,38 @@ class DIV2K_Validation(Dataset):
         hr = self.to_tensor(hr)
 
         # Use FSR edge map
+        edge_lr = fsr_edge(lr.unsqueeze(0)).squeeze(0)
+        edge_hr = fsr_edge(hr.unsqueeze(0)).squeeze(0)
+
+        return lr, edge_lr, hr, edge_hr
+
+
+class BenchmarkDataset(Dataset):
+    def __init__(self, hr_dir: str, lr_dir: str, scale: int = 4):
+        self.hr_dir = hr_dir
+        self.lr_dir = lr_dir
+        self.scale = scale
+        self.to_tensor = T.ToTensor()
+        self.hr_images = _list_image_files(hr_dir)
+
+    def __len__(self):
+        return len(self.hr_images)
+
+    def __getitem__(self, idx):
+        hr_name = self.hr_images[idx]
+        lr_name = _resolve_lr_filename(hr_name, self.lr_dir, self.scale)
+
+        hr_path = os.path.join(self.hr_dir, hr_name)
+        lr_path = os.path.join(self.lr_dir, lr_name)
+
+        hr = Image.open(hr_path).convert("RGB")
+        lr = Image.open(lr_path).convert("RGB")
+
+        hr = _modcrop_hr_to_match_lr(hr, lr, self.scale)
+
+        lr = self.to_tensor(lr)
+        hr = self.to_tensor(hr)
+
         edge_lr = fsr_edge(lr.unsqueeze(0)).squeeze(0)
         edge_hr = fsr_edge(hr.unsqueeze(0)).squeeze(0)
 

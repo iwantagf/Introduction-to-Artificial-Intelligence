@@ -34,6 +34,19 @@ class EdgeGate(nn.Module):
         return x * gate + x
 
 
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        padding = kernel_size // 2
+        self.attn = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        avg_map = torch.mean(x, dim=1, keepdim=True)
+        max_map, _ = torch.max(x, dim=1, keepdim=True)
+        attention = torch.sigmoid(self.attn(torch.cat([avg_map, max_map], dim=1)))
+        return x * attention + x
+
+
 class ResidualEdgeBlock(nn.Module):
     def __init__(self, channels, edge_channels, kernel_size1=5, kernel_size2=5, residual_scale=0.1):
         super().__init__()
@@ -43,6 +56,7 @@ class ResidualEdgeBlock(nn.Module):
         self.act1 = nn.SiLU(inplace=True)
         self.gate2 = EdgeGate(channels, edge_channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=kernel_size2, padding=kernel_size2 // 2)
+        self.spatial_attention = SpatialAttention()
 
     def forward(self, x, edge_feat):
         residual = x
@@ -54,6 +68,7 @@ class ResidualEdgeBlock(nn.Module):
         if edge_feat is not None:
             x = self.gate2(x, edge_feat)
         x = self.conv2(x)
+        x = self.spatial_attention(x)
 
         return residual + self.residual_scale * x
 
@@ -106,6 +121,8 @@ class EdgeGuidedCNN(nn.Module):
             )
             self.fusion = nn.Conv2d(head_features, num_features, kernel_size=3, padding=1)
 
+        self.input_attention = SpatialAttention()
+
         # SRCNN Backbone now takes Edge Injection
         # We pass 'edge_feat_dim' as the size of extra channels
         edge_ch = self.edge_feat_dim if use_edge_branch else 0
@@ -141,11 +158,13 @@ class EdgeGuidedCNN(nn.Module):
             # Fusion at input
             x = torch.cat([rgb_feat, edge_feat], dim=1)
             x = self.fusion(x)
+            x = self.input_attention(x)
             
             x = self.body(x, edge_feat)
         else:
             x = self.head(lr)
             x = self.fusion(x)
+            x = self.input_attention(x)
             x = self.body(x, None)
         
         x = self.upsampler(x)

@@ -1,0 +1,50 @@
+[
+  {
+    "name": "imdn_x4",
+    "checkpoint": "external_benchmarks\\IMDN\\checkpoints\\IMDN_x4.pth",
+    "params": 715176,
+    "avg_y_ssim": 0.8381585377454758,
+    "avg_runtime_ms": 79.37519882202149,
+    "samples": 100
+  },
+  {
+    "name": "edge_guided_srcnn",
+    "checkpoint": "outputs\\checkpoints\\best.pth",
+    "params": 1315363,
+    "avg_y_ssim": 0.826291064620018,
+    "avg_runtime_ms": 144.96794471740722,
+    "samples": 100
+  },
+  {
+    "name": "srcnn_x4",
+    "checkpoint": "external_benchmarks\\SRCNN-PyTorch\\results\\pretrained_models\\srcnn_x4.pth.tar",
+    "params": 57281,
+    "avg_y_ssim": 0.8087864297628403,
+    "avg_runtime_ms": 2559.3534323120116,
+    "samples": 100
+  },
+  {
+    "name": "bicubic",
+    "checkpoint": "built-in",
+    "params": 0,
+    "avg_y_ssim": 0.779453721344471,
+    "avg_runtime_ms": 4.1567094373703,
+    "samples": 100
+  },
+  {
+    "name": "fsr",
+    "checkpoint": "built-in",
+    "params": 0,
+    "avg_y_ssim": 0.779453721344471,
+    "avg_runtime_ms": 11.37452033996582,
+    "samples": 100
+  },
+  {
+    "name": "rfdn_x4",
+    "checkpoint": "external_benchmarks\\RFDN\\trained_model\\RFDN_AIM.pth",
+    "params": 433448,
+    "avg_y_ssim": 0.6591639605164528,
+    "avg_runtime_ms": 74.18537498474122,
+    "samples": 100
+  }
+]

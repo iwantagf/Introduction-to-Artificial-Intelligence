@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import random
 from pathlib import Path
@@ -110,6 +111,74 @@ def benchmark_psnr(
 	if torch.isnan(mse) or mse <= eps:
 		return torch.tensor(0.0, device=pred.device)
 	return 20 * torch.log10(1.0 / torch.sqrt(mse + eps))
+
+
+def _gaussian_window(window_size: int, sigma: float, channels: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+	coords = torch.arange(window_size, device=device, dtype=dtype) - window_size // 2
+	kernel_1d = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+	kernel_1d = kernel_1d / kernel_1d.sum()
+	kernel_2d = torch.outer(kernel_1d, kernel_1d)
+	return kernel_2d.view(1, 1, window_size, window_size).repeat(channels, 1, 1, 1)
+
+
+def benchmark_ssim(
+	pred: torch.Tensor,
+	target: torch.Tensor,
+	shave: int = 0,
+	y_channel: bool = True,
+	window_size: int = 11,
+	sigma: float = 1.5,
+	eps: float = 1e-8,
+) -> torch.Tensor:
+	pred_eval = pred.clamp(0, 1)
+	target_eval = target.clamp(0, 1)
+
+	if y_channel:
+		pred_eval = rgb_to_y_channel(pred_eval)
+		target_eval = rgb_to_y_channel(target_eval)
+
+	pred_eval = shave_border(pred_eval, shave)
+	target_eval = shave_border(target_eval, shave)
+
+	_, channels, height, width = pred_eval.shape
+	effective_window = min(window_size, height, width)
+	if effective_window % 2 == 0:
+		effective_window -= 1
+	if effective_window < 1:
+		return torch.tensor(0.0, device=pred.device)
+
+	effective_sigma = sigma * effective_window / max(window_size, 1)
+	window = _gaussian_window(
+		effective_window,
+		max(effective_sigma, eps),
+		channels,
+		pred_eval.device,
+		pred_eval.dtype,
+	)
+	padding = effective_window // 2
+
+	mu_pred = F.conv2d(pred_eval, window, padding=padding, groups=channels)
+	mu_target = F.conv2d(target_eval, window, padding=padding, groups=channels)
+
+	mu_pred_sq = mu_pred.pow(2)
+	mu_target_sq = mu_target.pow(2)
+	mu_pred_target = mu_pred * mu_target
+
+	sigma_pred_sq = F.conv2d(pred_eval * pred_eval, window, padding=padding, groups=channels) - mu_pred_sq
+	sigma_target_sq = F.conv2d(target_eval * target_eval, window, padding=padding, groups=channels) - mu_target_sq
+	sigma_pred_target = F.conv2d(pred_eval * target_eval, window, padding=padding, groups=channels) - mu_pred_target
+
+	c1 = (0.01 ** 2)
+	c2 = (0.03 ** 2)
+	sigma_pred_sq = torch.clamp(sigma_pred_sq, min=0.0)
+	sigma_target_sq = torch.clamp(sigma_target_sq, min=0.0)
+
+	ssim_map = (
+		(2 * mu_pred_target + c1) * (2 * sigma_pred_target + c2)
+	) / (
+		(mu_pred_sq + mu_target_sq + c1) * (sigma_pred_sq + sigma_target_sq + c2) + eps
+	)
+	return ssim_map.mean()
 
 
 def save_preview(lr, sr, hr, save_path: Path, scale: int):
@@ -242,9 +311,9 @@ def validate(model, loader, device, lambda_edge: float, scale: int, preview_dir:
 	criterion = nn.MSELoss()
 	total_loss = 0.0
 	total_psnr = 0.0
-	total_benchmark_psnr = 0.0
+	total_benchmark_ssim = 0.0
 	total_lr_psnr = 0.0  # Baseline: bicubic LR upsampled PSNR
-	total_lr_benchmark_psnr = 0.0
+	total_lr_benchmark_ssim = 0.0
 	
 	total_samples = len(loader.dataset)
 	# Pick random start index for previews
@@ -281,9 +350,9 @@ def validate(model, loader, device, lambda_edge: float, scale: int, preview_dir:
 
 			total_loss += loss.item()
 			total_psnr += psnr(sr.clamp(0, 1), hr).item()
-			total_benchmark_psnr += benchmark_psnr(sr, hr, shave=scale, y_channel=True).item()
+			total_benchmark_ssim += benchmark_ssim(sr, hr, shave=scale, y_channel=True).item()
 			total_lr_psnr += psnr(lr_upsampled_psnr, hr).item()
-			total_lr_benchmark_psnr += benchmark_psnr(lr_upsampled_psnr, hr, shave=scale, y_channel=True).item()
+			total_lr_benchmark_ssim += benchmark_ssim(lr_upsampled_psnr, hr, shave=scale, y_channel=True).item()
 
 			# Metrics are computed on raw model output; RCAS is preview-only.
 			if use_rcas:
@@ -304,7 +373,7 @@ def validate(model, loader, device, lambda_edge: float, scale: int, preview_dir:
 			current_idx += batch_size
 
 	n = max(1, len(loader))
-	return total_loss / n, total_psnr / n, total_benchmark_psnr / n, total_lr_psnr / n, total_lr_benchmark_psnr / n
+	return total_loss / n, total_psnr / n, total_benchmark_ssim / n, total_lr_psnr / n, total_lr_benchmark_ssim / n
 
 
 def save_checkpoint(state: dict, is_best: bool, save_dir: Path):
@@ -361,7 +430,7 @@ def main():
 	ema = ModelEMA(model, decay=0.999)
 
 	start_epoch = 0
-	best_psnr = -1e9
+	best_metric = -1e9
 
 	if args.resume and os.path.isfile(args.resume):
 		checkpoint = torch.load(args.resume, map_location=device)
@@ -369,7 +438,7 @@ def main():
 		optimizer.load_state_dict(checkpoint["optimizer"])
 		scaler.load_state_dict(checkpoint["scaler"])
 		start_epoch = checkpoint.get("epoch", 0)
-		best_psnr = checkpoint.get("best_psnr", best_psnr)
+		best_metric = checkpoint.get("best_ssim", checkpoint.get("best_metric", checkpoint.get("best_psnr", best_metric)))
 		if "ema" in checkpoint:
 			ema.load_state_dict(checkpoint["ema"])
 
@@ -393,7 +462,7 @@ def main():
 			current_lambda = peak_lambda_edge - (peak_lambda_edge - final_lambda_edge) * phase_p
 		
 		train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, current_lambda, args.scale, ema, bool(args.use_rcas), args.rcas_strength)
-		val_loss, val_psnr, val_benchmark_psnr, lr_psnr, lr_benchmark_psnr = validate(model, valid_loader, device, current_lambda, args.scale, preview_dir, args.preview_count, epoch, bool(args.use_rcas), args.rcas_strength)
+		val_loss, val_psnr, val_benchmark_ssim, lr_psnr, lr_benchmark_ssim = validate(model, valid_loader, device, current_lambda, args.scale, preview_dir, args.preview_count, epoch, bool(args.use_rcas), args.rcas_strength)
 
 		scheduler.step(epoch + 1)
 
@@ -403,20 +472,20 @@ def main():
 			"ema": ema.state_dict(),
 			"optimizer": optimizer.state_dict(),
 			"scaler": scaler.state_dict(),
-			"best_psnr": best_psnr,
+			"best_ssim": best_metric,
 		}
 
-		is_best = val_benchmark_psnr > best_psnr
+		is_best = val_benchmark_ssim > best_metric
 		if is_best:
-			best_psnr = val_benchmark_psnr
-			print(f"New best benchmark PSNR: {best_psnr:.4f} at epoch {epoch+1} with λ_edge: {current_lambda:.4f}")
+			best_metric = val_benchmark_ssim
+			print(f"New best benchmark SSIM: {best_metric:.4f} at epoch {epoch+1} with λ_edge: {current_lambda:.4f}")
 			print(f"Saving best checkpoint to {ckpt_dir / 'best.pth'}")
 		save_checkpoint(state, is_best, ckpt_dir)
 
 		print(
 			f"Epoch {epoch+1}/{args.epochs} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} "
-			f"| val_psnr_rgb: {val_psnr:.2f} | val_psnr_y: {val_benchmark_psnr:.2f} "
-			f"| lr_psnr_rgb: {lr_psnr:.2f} | lr_psnr_y: {lr_benchmark_psnr:.2f}"
+			f"| val_psnr_rgb: {val_psnr:.2f} | val_ssim_y: {val_benchmark_ssim:.4f} "
+			f"| lr_psnr_rgb: {lr_psnr:.2f} | lr_ssim_y: {lr_benchmark_ssim:.4f}"
 		)
 
 
